@@ -133,13 +133,22 @@ struct Physics
     // Check collision with `s`.
     [[nodiscard]] virtual bool CheckCollisionWithSolidEntity(ivec2 self_pos, const Solid &s) const {return s.IsSolidAtRect(self_pos + PhysicsRoughRelativeHitbox());}
 
-    [[nodiscard]] bool CheckCollisionWithWorld(std::optional<ivec2> self_pos_override, std::optional<irect2> hitbox_override) const
+    [[nodiscard]] bool CheckCollisionWithWorld(
+        std::optional<ivec2> self_pos_override = {},
+        std::optional<irect2> hitbox_override = {},
+        std::function<bool(const Game::Entity &e)> respect_entity = nullptr
+    ) const
     {
         irect2 hitbox = (self_pos_override ? *self_pos_override : Pos()) + (hitbox_override ? *hitbox_override : PhysicsRoughRelativeHitbox());
         const auto &tree = game.get<BvhTree>()->tree;
         return tree.CollideAabb(hitbox, [&](int index)
         {
-            auto &s = game.get(tree.GetNodeUserData(index)).get<Solid>();
+            auto &e = game.get(tree.GetNodeUserData(index));
+            if (e.get_opt<Physics>() == this)
+                return false;
+            if (respect_entity && !respect_entity(e))
+                return false;
+            auto &s = e.get<Solid>();
             return s.IsSolidAtRect(hitbox);
         });
     }
