@@ -24,7 +24,7 @@ void Map::Load(Stream::Input source)
         target_cell.random = ra.i <= 255;
     }
 
-    SetVolumeRectSub(ivec2().rect_size(cells.size() * tile_size * subpixel_resolution));
+    SetVolumeRect(ivec2().rect_size(cells.size() * tile_size));
 }
 
 void Map::Render() const
@@ -52,19 +52,19 @@ void Map::Render() const
     }
 }
 
-bool Map::IsSolidAtPointSub(ivec2 point) const
+bool Map::IsSolidAtPoint(ivec2 point) const
 {
-    ivec2 tile_pos = div_ex(point, tile_size * subpixel_resolution);
+    ivec2 tile_pos = div_ex(point, tile_size);
     if (!cells.pos_in_range(tile_pos))
         return false;
     return GetTileInfo(cells.safe_nonthrowing_at(tile_pos).mid).solid;
 }
 
-bool Map::IsSolidAtRectSub(irect2 rect) const
+bool Map::IsSolidAtRect(irect2 rect) const
 {
-    return Math::for_each_cuboid_point(rect.a, prev_value(rect.b), ivec2(tile_size * subpixel_resolution), nullptr, [this](ivec2 point) -> bool
+    return Math::for_each_cuboid_point(rect.a, prev_value(rect.b), ivec2(tile_size), nullptr, [this](ivec2 point) -> bool
     {
-        return IsSolidAtPointSub(point);
+        return IsSolidAtPoint(point);
     });
 }
 

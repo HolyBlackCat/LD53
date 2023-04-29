@@ -3,45 +3,34 @@
 #include "entities.h"
 #include "map.h"
 
-struct Player : Tickable, Renderable, SolidPhysicsRect, Camera
+struct Parcel : Tickable, Renderable, SolidPhysicsRect, Game::LinkOne<"carried_by">
 {
     IMP_STANDALONE_COMPONENT(Game)
 
-    Input::ButtonList control_left = {{Input::a, Input::left}};
-    Input::ButtonList control_right = {{Input::d, Input::right}};
-    Input::ButtonList control_jump = {{Input::j, Input::space, Input::x}};
-
-    ivec2 CameraPos() const override
+    irect2 PhysicsRoughRelativeHitbox() const override
     {
-        return Pos();
+        return ivec2().centered_rect_size(ivec2(24, 15));
     }
 
-    irect2 PhysicsRelativeHitbox() const override
+    float PhysicsMass() const override
     {
-        return ivec2().centered_rect_size(ivec2(14,24));
+        return 2;
+    }
+
+    // Disable some interactions while we're being carried.
+    bool PhysicsEnabled() const override
+    {
+        return !game.has_link<"carried_by">(*this);
+    }
+    std::optional<irect2> SolidSimpleRectHitbox() const override
+    {
+        return !game.has_link<"carried_by">(*this) ? SolidPhysicsRect::SolidSimpleRectHitbox() : std::nullopt;
     }
 
     void Tick() override
     {
-        constexpr float
-            walk_acc   = 0.3f,
-            walk_speed = 2.f,
-            walk_dec   = 0.3f,
-            jump_speed = 3.2f,
-            short_jump_drag = 0.94f;
-
-        int hc = control_right.down() - control_left.down();
-        if (hc)
-            clamp_var_abs(vel.x += hc * walk_acc, walk_speed);
-        else if (abs(vel.x) > walk_dec)
-            vel.x -= sign(vel.x) * walk_dec;
-        else
-            vel.x = 0;
-
-        if (ground && control_jump.pressed())
-            vel.y = -jump_speed;
-        if (!ground && !control_jump.down() && vel.y < 0)
-            vel.y *= short_jump_drag;
+        if (ground)
+            vel.x *= 0.85f;
     }
 
     void Render() const override
@@ -49,13 +38,161 @@ struct Player : Tickable, Renderable, SolidPhysicsRect, Camera
         ivec2 pixel_pos = Pos() - game.get<Camera>()->CameraPos();
         if (pixel_pos.abs()(any) > screen_size / 2 + tile_size * 2)
             return;
-        r.iquad(pixel_pos, "player"_image).center();
+        r.iquad(pixel_pos, "parcel"_image).center();
+    }
+};
+
+struct Player : Tickable, Renderable, SolidPhysicsRect, Camera, Game::LinkOne<"carries">
+{
+    IMP_STANDALONE_COMPONENT(Game)
+
+    Input::ButtonList control_left = {{Input::a, Input::left}};
+    Input::ButtonList control_right = {{Input::d, Input::right}};
+    Input::ButtonList control_jump = {{Input::j, Input::x, Input::space}};
+    Input::ButtonList control_act = {{Input::k, Input::z}};
+
+    bool facing_left = false;
+    int walking_time = -1;
+
+    bool NowCarrying() const
+    {
+        return game.has_link<"carries">(*this);
+    }
+
+    ivec2 CameraPos() const override
+    {
+        return Pos();
+    }
+
+    irect2 HitboxWithoutParcel() const
+    {
+        return ivec2(-7,-15).rect_to(ivec2(6, 12));
+    }
+    irect2 HitboxWithParcel() const
+    {
+        return ivec2(-7,-29).rect_to(ivec2(6, 12));
+    }
+
+    irect2 PhysicsRoughRelativeHitbox() const override
+    {
+        // We just use the larger hitbox here, since it's only used for the broad phase.
+        return HitboxWithParcel();
+    }
+
+    std::optional<irect2> SolidSimpleRectHitbox() const override
+    {
+        return Pos() + (NowCarrying() ? HitboxWithParcel() : HitboxWithoutParcel());
+    }
+
+    bool CheckCollisionWithSolidEntity(ivec2 self_pos, const Solid &s) const override
+    {
+        // Ignore our own box.
+        if (NowCarrying() && &s == &game.get_link<"carries">(*this).get<Solid>())
+            return false;
+        return s.IsSolidAtRect(self_pos + SolidSimpleRectHitbox().value() - Pos());
+    }
+
+    void Tick() override
+    {
+        constexpr float
+            walk_acc            = 0.3f,
+            walk_speed          = 2.f,
+            walk_speed_carrying = 1.f,
+            walk_dec            = 0.3f,
+            jump_speed          = 3.2f,
+            jump_speed_carrying = 2.1f,
+            short_jump_drag     = 0.94f;
+
+        constexpr ivec2
+            parcel_pickup_extra_hitbox_size(8);
+
+        { // Walk.
+            int hc = control_right.down() - control_left.down();
+            if (hc)
+                clamp_var_abs(vel.x += hc * walk_acc, (NowCarrying() ? walk_speed_carrying : walk_speed));
+            else if (abs(vel.x) > walk_dec)
+                vel.x -= sign(vel.x) * walk_dec;
+            else
+                vel.x = 0;
+
+            { // Update walk animation.
+                if (hc)
+                    facing_left = hc < 0;
+                if (abs(vel.x) > 0.6f)
+                    walking_time++;
+                else
+                    walking_time = -1;
+            }
+        }
+
+        { // Jump.
+            if (ground && control_jump.pressed())
+                vel.y = -(NowCarrying() ? jump_speed_carrying : jump_speed);
+            if (!ground && !control_jump.down() && vel.y < 0)
+                vel.y *= short_jump_drag;
+        }
+
+        { // Picking up and dropping the parcel.
+            if (control_act.pressed())
+            {
+                if (!NowCarrying())
+                {
+                    auto &parcel = game.get<Parcel>();
+                    if (parcel && (Pos() + HitboxWithoutParcel()).expand(parcel_pickup_extra_hitbox_size).touches(parcel->Pos() + parcel->PhysicsRoughRelativeHitbox()))
+                    {
+                        game.link<"carries", "carried_by">(*this, *parcel);
+                    }
+                }
+                else
+                {
+                    auto &parcel = game.get_link<"carries">(*this);
+                    if (!parcel.get<Physics>().CheckCollisionWithWorld({}, {}))
+                        game.unlink<"carries">(*this);
+                }
+            }
+        }
+
+        { // Updating parcel position to match ours.
+            if (NowCarrying())
+            {
+                game.get_link<"carries">(*this).get<Physics>().SetPos(Pos() with(.y -= 24));
+            }
+        }
+    }
+
+    void Render() const override
+    {
+        constexpr ivec2 sprite_size(32);
+
+        ivec2 pixel_pos = Pos() - game.get<Camera>()->CameraPos();
+        if (pixel_pos.abs()(any) > screen_size / 2 + sprite_size)
+            return;
+
+        int variant = 0;
+        int frame = 0;
+
+        if (!ground)
+        {
+            variant = 2;
+            frame = vel.y < -0.5f ? 0 : vel.y < 0.5f ? 1 : 2;
+        }
+        else if (walking_time >= 0)
+        {
+            variant = 1;
+            frame = walking_time / 12 % 5;
+        }
+        else
+        {
+            variant = 0;
+        }
+
+        r.iquad(pixel_pos with(.y -= 4), "player"_image with(= _.a + (ivec2(frame, variant) * sprite_size).rect_size(sprite_size))).center().flip_x(facing_left);
     }
 };
 
 struct Box : Tickable, Renderable, SolidPhysicsRect
 {
-    irect2 PhysicsRelativeHitbox() const override
+    irect2 PhysicsRoughRelativeHitbox() const override
     {
         return ivec2().centered_rect_size(ivec2(12));
     }
@@ -68,7 +205,7 @@ struct Box : Tickable, Renderable, SolidPhysicsRect
     void Tick() override
     {
         if (ground)
-            vel.x *= 0.95f;
+            vel.x *= 0.85f;
     }
 
     void Render() const override
@@ -101,13 +238,18 @@ namespace States
             auto &map = game.create<Map>();
             map.Load(Program::ExeDir() + "assets/map.json");
 
-            game.create<Player>().SetPos(iround(map.points.GetSinglePoint("player")));
 
             map.points.ForEachPointNamed("box", [](fvec2 pos)
             {
                 auto &box = game.create<Box>();
                 box.SetPos(iround(pos));
             });
+
+            if (auto parcel_pos = map.points.GetSinglePointOpt("parcel"))
+            {
+                game.create<Parcel>().SetPos(iround(*parcel_pos) with(.y += 4));
+            }
+            game.create<Player>().SetPos(iround(map.points.GetSinglePoint("player")));
         }
 
         void TickPhysics()
@@ -123,9 +265,9 @@ namespace States
             struct Entry
             {
                 Physics *target = nullptr;
-                ivec2 remaining_move_sub;
+                ivec2 remaining_move;
                 std::pair<int, float> initiative{};
-                ivec2 new_pos_sub;
+                ivec2 new_pos;
 
                 std::vector<OtherSolid> overlaps;
             };
@@ -137,7 +279,7 @@ namespace States
                 std::vector<OtherSolid> overlaps;
             };
 
-            const auto &bvh_tree = game.get<BvhTree>()->tree_sub;
+            const auto &bvh_tree = game.get<BvhTree>()->tree;
 
             // Update `vel_lag` and collect physics objects.
             // Also apply gravity.
@@ -146,22 +288,28 @@ namespace States
             for (auto &e : game.get<AllPhysics>())
             {
                 Physics &ph = e.get<Physics>();
+                if (!ph.PhysicsEnabled())
+                    continue;
                 ph.vel.y += gravity;
-                ivec2 move_sub = round_with_compensation(ph.vel * subpixel_resolution, ph.vel_lag);
+                ivec2 move = round_with_compensation(ph.vel, ph.vel_lag);
                 ph.vel_lag = next_value_towards(ph.vel_lag, 0);
 
-                remaining_targets.push_back({.target = &ph, .remaining_move_sub = move_sub, .initiative = {move_sub.abs().max(), ph.vel.max()}, .new_pos_sub = ph.PosSub()});
+                remaining_targets.push_back({.target = &ph, .remaining_move = move, .initiative = {move.abs().max(), ph.vel.max()}, .new_pos = ph.Pos()});
 
                 int self_index = -1;
                 if (auto solid = e.get_opt<Solid>())
                     self_index = solid->GetBvhTreeIndex();
 
-                bvh_tree.CollideAabb((ph.PosSub() + ph.PhysicsRelativeHitboxSub()).expand_dir(move_sub).expand(1), [&](int index)
+                bvh_tree.CollideAabb((ph.Pos() + ph.PhysicsRoughRelativeHitbox()).expand_dir(move).expand(1), [&](int index)
                 {
                     if (index != self_index)
                     {
                         auto &e = game.get(bvh_tree.GetNodeUserData(index));
-                        remaining_targets.back().overlaps.push_back({.s = &e.get<Solid>(), .p = e.get_opt<Physics>()});
+
+                        OtherSolid other{.s = &e.get<Solid>(), .p = e.get_opt<Physics>()};
+                        if (other.p && !other.p->PhysicsEnabled())
+                            other.p = nullptr;
+                        remaining_targets.back().overlaps.push_back(other);
                     }
                     return false;
                 });
@@ -181,7 +329,7 @@ namespace States
             }
 
             // Strip non-moving objects from targets.
-            std::erase_if(remaining_targets, [](const Entry &e){return !e.remaining_move_sub;});
+            std::erase_if(remaining_targets, [](const Entry &e){return !e.remaining_move;});
 
             // Move objects.
             bool had_progress = true;
@@ -196,14 +344,14 @@ namespace States
 
                     for (int axis = 0; axis < 2; axis++)
                     {
-                        ivec2 step_sub = sign(entry.remaining_move_sub.only_component(axis));
-                        if (!step_sub)
+                        ivec2 step = sign(entry.remaining_move.only_component(axis));
+                        if (!step)
                             continue;
 
                         bool collides = false;
                         for (const auto &overlap : entry.overlaps)
                         {
-                            if (overlap.s->IsSolidAtRectSub(entry.new_pos_sub + entry.target->PhysicsRelativeHitboxSub() + step_sub))
+                            if (entry.target->CheckCollisionWithSolidEntity(entry.new_pos + step, *overlap.s))
                             {
                                 collides = true;
                                 break;
@@ -213,13 +361,13 @@ namespace States
                         if (!collides)
                         {
                             had_progress = true;
-                            entry.new_pos_sub += step_sub;
-                            entry.remaining_move_sub -= step_sub;
+                            entry.new_pos += step;
+                            entry.remaining_move -= step;
                         }
                     }
 
                     // Erase entities that ran out of speed.
-                    if (entry.remaining_move_sub)
+                    if (entry.remaining_move)
                     {
                         if (pos != i)
                             remaining_targets[pos] = std::move(remaining_targets[i]);
@@ -227,14 +375,14 @@ namespace States
                     }
                     else
                     {
-                        entry.target->SetPosSub(entry.new_pos_sub);
+                        entry.target->SetPos(entry.new_pos);
                     }
                 }
                 remaining_targets.resize(pos);
             }
             for (auto &entry : remaining_targets)
             {
-                entry.target->SetPosSub(entry.new_pos_sub);
+                entry.target->SetPos(entry.new_pos);
             }
             remaining_targets.clear();
 
@@ -271,7 +419,7 @@ namespace States
                     for (int axis = 0; axis < 2; axis++)
                     {
                         ivec2 dir = sign(entry.target->vel.only_component(axis));
-                        if (other.s->IsSolidAtRectSub(entry.target->PosSub() + entry.target->PhysicsRelativeHitboxSub() + dir))
+                        if (entry.target->CheckCollisionWithSolidEntity(entry.target->Pos() + dir, *other.s))
                             TransferImpulse(*entry.target, axis, other);
                     }
                 }

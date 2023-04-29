@@ -1,8 +1,5 @@
 #pragma once
 
-constexpr int subpixel_resolution = 1;
-constexpr int subpixel_hitbox_shrinkage = 0;
-
 struct Game : Ent::BasicTag<Game,
     Ent::Mixins::ComponentsAsCategories,
     Ent::Mixins::GlobalEntityLists,
@@ -40,14 +37,14 @@ struct BvhTree
 {
     IMP_STANDALONE_COMPONENT(Game)
 
-    AabbTree<ivec2, Game::Id> tree_sub;
+    AabbTree<ivec2, Game::Id> tree;
 
     BvhTree()
     {
-        decltype(tree_sub)::Params params(ivec2(8 * subpixel_resolution));
+        decltype(tree)::Params params(ivec2(8));
         params.velocity_margin_factor = ivec2(4);
         // params.balance_threshold = 2;
-        tree_sub = params;
+        tree = params;
     }
 };
 
@@ -66,19 +63,19 @@ struct StoredInBvhTree
     std::optional<State> state;
 
   protected:
-    void SetVolumeRectSub(irect2 rect, ivec2 vel = {})
+    void SetVolumeRect(irect2 rect, ivec2 vel = {})
     {
         if (state)
-            game.get<BvhTree>()->tree_sub.ModifyNode(state->tree_index, rect, vel);
+            game.get<BvhTree>()->tree.ModifyNode(state->tree_index, rect, vel);
         else
-            state.emplace(State{.tree_index = game.get<BvhTree>()->tree_sub.AddNode(rect, dynamic_cast<Game::Entity &>(*this).id()), .aabb = rect});
+            state.emplace(State{.tree_index = game.get<BvhTree>()->tree.AddNode(rect, dynamic_cast<Game::Entity &>(*this).id()), .aabb = rect});
     }
     void ResetVolumeRect()
     {
         if (state)
         {
             if (auto &tree = game.get<BvhTree>())
-                tree->tree_sub.RemoveNode(state->tree_index);
+                tree->tree.RemoveNode(state->tree_index);
             state.reset();
         }
     }
@@ -105,8 +102,8 @@ struct Solid : StoredInBvhTree
 {
     IMP_COMPONENT(Game)
 
-    [[nodiscard]] virtual bool IsSolidAtPointSub(ivec2 point) const = 0;
-    [[nodiscard]] virtual bool IsSolidAtRectSub(irect2 rect) const = 0;
+    [[nodiscard]] virtual bool IsSolidAtPoint(ivec2 point) const = 0;
+    [[nodiscard]] virtual bool IsSolidAtRect(irect2 rect) const = 0;
 };
 
 struct Physics
@@ -114,7 +111,7 @@ struct Physics
     IMP_COMPONENT(Game)
 
   private:
-    ivec2 pos_subpixels;
+    ivec2 pos;
 
   public:
     fvec2 vel;
@@ -122,42 +119,63 @@ struct Physics
 
     bool ground = false;
 
-    virtual void SetPosSub(ivec2 new_pos_subpixels) {pos_subpixels = new_pos_subpixels;}
-    void SetPos(ivec2 new_pos) {SetPosSub(new_pos * subpixel_resolution);}
-    [[nodiscard]] ivec2 PosSub() const {return pos_subpixels;}
-    [[nodiscard]] ivec2 Pos() const {return div_ex(pos_subpixels, subpixel_resolution);}
+    virtual void SetPos(ivec2 new_pos) {pos = new_pos;}
+    [[nodiscard]] ivec2 Pos() const {return pos;}
 
-    // The hitbox, relative to `pos`.
-    [[nodiscard]] virtual irect2 PhysicsRelativeHitbox() const = 0;
-    [[nodiscard]] irect2 PhysicsRelativeHitboxSub() const {return (PhysicsRelativeHitbox() * subpixel_resolution).shrink(subpixel_hitbox_shrinkage);}
+    [[nodiscard]] virtual bool PhysicsEnabled() const {return true;}
+
+    // The approximate hitbox (for the AABB tree), relative to `pos`.
+    [[nodiscard]] virtual irect2 PhysicsRoughRelativeHitbox() const = 0;
 
     // Matters when transfering momentum between entities.
     virtual float PhysicsMass() const {return 1;}
 
-    // Whether the physics should respect a specific solid entity.
-    [[nodiscard]] virtual bool PhysicsRespectsSolidEntity(const Game::Entity &e) {(void)e; return true;}
+    // Check collision with `s`.
+    [[nodiscard]] virtual bool CheckCollisionWithSolidEntity(ivec2 self_pos, const Solid &s) const {return s.IsSolidAtRect(self_pos + PhysicsRoughRelativeHitbox());}
+
+    [[nodiscard]] bool CheckCollisionWithWorld(std::optional<ivec2> self_pos_override, std::optional<irect2> hitbox_override) const
+    {
+        irect2 hitbox = (self_pos_override ? *self_pos_override : Pos()) + (hitbox_override ? *hitbox_override : PhysicsRoughRelativeHitbox());
+        const auto &tree = game.get<BvhTree>()->tree;
+        return tree.CollideAabb(hitbox, [&](int index)
+        {
+            auto &s = game.get(tree.GetNodeUserData(index)).get<Solid>();
+            return s.IsSolidAtRect(hitbox);
+        });
+    }
 };
 using AllPhysics = Game::Category<Ent::OrderedList, Physics>;
 
-struct SolidPhysicsRect : Physics, Solid
+struct SolidRect : Solid
 {
     IMP_COMPONENT(Game)
 
-    void SetPosSub(ivec2 new_pos_subpixels) override
+    virtual std::optional<irect2> SolidSimpleRectHitbox() const = 0;
+
+    bool IsSolidAtPoint(ivec2 point) const override final
     {
-        if (new_pos_subpixels != Pos())
-        {
-            Physics::SetPosSub(new_pos_subpixels);
-            SetVolumeRectSub(PosSub() + PhysicsRelativeHitboxSub());
-        }
+        auto r = SolidSimpleRectHitbox();
+        return r && r->contains(point);
+    }
+    bool IsSolidAtRect(irect2 rect) const override final
+    {
+        auto r = SolidSimpleRectHitbox();
+        return r && r->touches(rect);
+    }
+};
+
+struct SolidPhysicsRect : Physics, SolidRect
+{
+    IMP_COMPONENT(Game)
+
+    void SetPos(ivec2 new_pos) override
+    {
+        Physics::SetPos(new_pos);
+        SetVolumeRect(Pos() + PhysicsRoughRelativeHitbox());
     }
 
-    bool IsSolidAtPointSub(ivec2 point) const override
+    std::optional<irect2> SolidSimpleRectHitbox() const override
     {
-        return (PosSub() + PhysicsRelativeHitboxSub()).contains(point);
-    }
-    bool IsSolidAtRectSub(irect2 rect) const override
-    {
-        return (PosSub() + PhysicsRelativeHitboxSub()).touches(rect);
+        return Pos() + PhysicsRoughRelativeHitbox();
     }
 };

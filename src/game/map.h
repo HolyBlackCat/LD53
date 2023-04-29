@@ -29,8 +29,8 @@ struct Map : Renderable, Solid
     void Load(Stream::Input source);
 
     void Render() const override;
-    bool IsSolidAtPointSub(ivec2 point) const override;
-    bool IsSolidAtRectSub(irect2 rect) const override;
+    bool IsSolidAtPoint(ivec2 point) const override;
+    bool IsSolidAtRect(irect2 rect) const override;
 };
 
 struct TileInfo
