@@ -40,6 +40,7 @@ PROJ_CXXFLAGS += -includesrc/program/common_macros.h -includesrc/program/parachu
 PROJ_CXXFLAGS += -Isrc -Ilib/include
 PROJ_CXXFLAGS += -DIMGUI_USER_CONFIG=\"third_party_connectors/imconfig.h\"# Custom ImGui config.
 PROJ_CXXFLAGS += -DFMT_DEPRECATED_OSTREAM# See issue: https://github.com/fmtlib/fmt/issues/3088
+PROJ_CXXFLAGS += -DIMP_AUTO_VALIDATE_AABB_TREES=0# For speed.
 
 PROJ_LDFLAGS :=
 ifeq ($(TARGET_OS),windows)
